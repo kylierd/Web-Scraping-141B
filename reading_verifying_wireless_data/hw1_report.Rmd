@@ -1,0 +1,287 @@
+---
+title: "STA 141B Homework 1 Report"
+author: "Kylie Dickinson"
+date: "2026-04-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  fig.align="center"
+  )
+options(scipen=999)
+
+library(ggplot2)
+theme_set(
+  theme_minimal(base_family = "serif") +
+    theme(
+      plot.title = element_text(size=11),
+      axis.title = element_text(size=10),
+      legend.text = element_text(size=10),
+      legend.title = element_text(size=10)
+    )
+)
+```
+
+```{r packages}
+library(dplyr)
+library(tidyverse)
+```
+
+## Approach
+
+The goal is to re-format the text into a dataframe. The beginning of the file indicates comments; to ensure they will not interfere with the dataframe, lines that start with "#" will be ignored. 
+
+```{r, eval=FALSE, echo=TRUE}
+text = text[substring(text, 1, 1) != "#"] 
+```
+
+To start parsing the data, a function called `parse_line` is made. After the data is read in via `readLines()`, `parse_line` first splits the line using the delimiter ";", followed by allocating the new splits into their rightful categories: 
+
+* `timestamp` takes the "t=" split
+* `id` takes the "id=" split
+* `x`, `y`,and `z` takes the "pos=" split, then cut into three segments by the delimiter "," to get individual columns
+* `degree` takes the "degree=" split
+
+```{r, eval=FALSE, echo=TRUE}
+  parts = strsplit(line, ";")[[1]]
+  
+  t_val = sub("t=", "", parts[1])
+  id_val = sub("id=", "", parts[2])
+  
+  pos_vals = strsplit(sub("pos=", "", parts[3]), ",")[[1]] 
+  x_val = pos_vals[1]
+  y_val = pos_vals[2]
+  z_val = pos_vals[3]
+  
+  deg_val = sub("degree=", "", parts[4])
+```
+
+Once this is finished, the mac addresses are next to format. The approach is to have each unique mac address have its own row, with the timestamp, id, position (x, y, z), and degree being duplicated across every mac row for that line.
+
+To obtain the mac addresses, an inner function is written inside the `parse_line` function to parse in the mac variables by ignoring the first 4 splits (by ";"). This function takes in the rest of the splits after degree, ignores empty strings, and splits on the delimiter "=", which divides the mac address from its three properties of signal, channel, and device type. A check is done on the new split to ensure the length is 2 (accounting for the address split and the properties split), returning NULL if failed for the mac entry so that it is filtered out. 
+
+```{r, echo=TRUE, eval=FALSE}
+    addr_split = strsplit(entry, "=")[[1]] 
+    if (length(addr_split) < 2) return(NULL) 
+    
+    address = addr_split[1] # first item
+    
+    vals = strsplit(addr_split[2], ",")[[1]] # second item
+    signal = ifelse(length(vals) >= 1, vals[1], NA)
+    channel = ifelse(length(vals) >= 2, vals[2], NA)
+    device_type = ifelse(length(vals) >= 3, vals[3], NA)
+```
+
+The address is taken by getting the first index, followed by the values of signal, channel, and device type as the second index, and then allocating them to their own columns. There is a check to make sure there is a value for each of the descriptors. A dataframe is constructed within this inner function that consists of the mac address and corresponding signal, channel, and device type. The inner mac-parsing function ends here, and after checking to make sure the `macs_parsed` list has no NULLs and is not empty, the `parse_line` function finishes by binding the timestamp, id, x, y, z, and degree to each of the mac addresses.  
+
+Once `parse_line` is defined, `lapply()` applies it to every line in the text file, which produces a list of dataframes. Since there is a dataframe per line, `do.call(rbind, result_list)` is used to bind them together into one dataframe called `final_df`. 
+
+```{r, echo=TRUE, eval=FALSE}
+result_list = lapply(text, parse_line)
+final_df = do.call(rbind, result_list)
+```
+
+Numeric columns have their data types converted to either numeric or integer (signal, device type) and the timestamp is converted to UTC time for readability. A stack overflow [\underline{post}](https://stackoverflow.com/questions/13456241/convert-unix-epoch-to-date-object) was used in the assistance of converting the timestamp.
+
+Corner cases are handled throughout `parse_line`. Comment lines beginning with "#" are filtered out and trailing semicolons that produce empty strings are removed before mac parsing. Malformed mac address entries are also eliminated via the 2-length check and return NULL. Mac descriptors (signal, channel, device type) are reviewed by checking for the three values and fills in with NA if there is a missing value, rather than throw an index error. After the inner function finishes, the `macs_parsed` list is re-checked for NULLs and if it is empty, it returns NULL and is dropped from the `mac_df = do.call(rbind, macs_parsed)` process. 
+
+## Data Validation
+
+```{r df}
+final_df = readRDS("final_df.rds")
+```
+
+The final dataframe `final_df` is previewed as below:
+
+```{r, out.width="80%", fig.align="center", echo=FALSE}
+knitr::include_graphics("head_table.png")
+```
+
+The structure and values appear consistent with the expected format from the raw data. 
+
+```{r signal distribution, fig.width=4, fig.height=3}
+ggplot(final_df, aes(x=signal)) + 
+  geom_histogram(bins=30, fill="#6982b3") + 
+  ggtitle("Distribution of Signal") 
+```
+
+The signal distribution looks normal with no evident abnormalities. Signal strength is also examined against the x- and y-coordinates.
+
+```{r xy graph, fig.width=5, fig.height=3}
+ggplot(final_df, aes(x=x, y=y, color=signal)) + 
+  geom_point(alpha = 0.6) + 
+  scale_color_gradient(low="blue", high="red") +
+  ggtitle("X and Y Coordinates by Signal") 
+```
+
+Next, the timestamp variable is examined and a sanity check was performed to ensure the dates were converted correctly. 
+
+```{r, echo=TRUE, eval=FALSE}
+date = as.Date(final_df$timestamp)
+print(unique(date)) 
+```
+
+```{r, out.width="15%", echo=FALSE}
+knitr::include_graphics("unique_dates.png")
+```
+
+There looks to be three unique dates after conversion. Since the timestamp was converted, a time-based distribution was also plotted to spot abnormalities. The resulting plot appears consistent across all dates with no obvious anomalies.
+
+```{r date plot, fig.width=6, fig.height=3}
+final_df$time_min = format(final_df$timestamp, "%H:%M")
+final_df$date = as.factor(as.Date(final_df$timestamp))
+ggplot(final_df, aes(x=time_min, fill=date)) + 
+  geom_bar() + 
+  facet_wrap(~date, scales="free_x") +
+  scale_x_discrete(breaks=function(x) x[seq(1, length(x), by=35)]) + # less label bloat
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, size=5)) +
+  ggtitle("Hour-Minute Counts by Date") 
+```
+
+A summary of `final_df` contains a few notable details. The device type seems to only contain two device types, 1 and 3, and the z-coordinate is 0.0 for all entries. Below is a summary of all numeric variables, with an inclusion of the timestamp. 
+
+```{r, out.width="95%", fig.align="center", echo=FALSE}
+knitr::include_graphics("numeric_summary.png")
+```
+
+The boxplot of signal by device type shows no obvious abnormalities, and any outliers appear reasonable.
+
+```{r boxplot, fig.width=5, fig.height=3}
+ggplot(final_df, aes(x=factor(device_type), y=signal, fill=factor(device_type))) + 
+  geom_boxplot() +
+  ggtitle("Boxplot of Device Type by Signal") # signal looks reasonable, no obvious abnormalities
+```
+
+As further sanity checks, each column in `final_df` are examined for NAs, where none are found, as well as taking a look at the number of unique values in each column. In this way, it is confirmed that there are only two device types, only one value (0.0) for the z-coordinate, and a singular id (00:02:2D:21:0F:33) used for all entries. It's confirmed in another check in the validation file that there is only one id.
+
+```{r, echo=TRUE, eval=FALSE}
+print(colSums(is.na(final_df))) 
+print(sapply(final_df, function(x) length(unique(x)))) 
+
+length(unique(final_df$id))
+```
+
+```{r, out.width="35%", fig.align="center", echo=FALSE}
+knitr::include_graphics("unique_counts.png")
+```
+
+For further insight, device 1 has 203185 entries (proportion=0.172) and device 3 has 978443 entries (proportion=0.828). A look at the mac address channels also shows no problem, although channel 2472000000 has a notable smaller occurrence than the other channels.
+
+```{r channel plot, fig.width=4, fig.height=3}
+ggplot(final_df, aes(x=channel)) + 
+  geom_bar(fill="#69b3a2") + 
+  ggtitle("Distribution of Channel Type") 
+```
+
+The distribution below shows reasonable values for the mac addresses except for the last three addresses, but a closer analysis shows that the three addresses have only one entry, so it minimally shows up on the graph even with a scaled x-axis. 
+
+```{r mac address plot, fig.width=5, fig.height=3}
+mac_counts = count(final_df, mac_address, sort=TRUE) 
+ggplot(mac_counts, aes(x=reorder(mac_address, n), y=log(n))) +
+  geom_bar(stat="identity", fill="#8869b3") +
+  xlab("mac_address") +
+  ylab("log(count)") +
+  coord_flip() +
+  ggtitle("Log Count Distribution of Mac Addresses") 
+```
+
+```{r, out.width="30%", fig.align="center", echo=FALSE}
+knitr::include_graphics("mac_counts.png")
+```
+
+Overall, the validation checks indicate that the dataset is clean, consistent, and free of missing values. 
+
+## AI Usage 
+
+The AI used was ChatGPT. The prompts are as follows:
+
+> i have a text file that has multiple lines with a delimeter of ";" i want to read it into a csv file in R and this is my strategy: for "t=" until ";" use for timestamp for "id=" until ";" use for id for "pos=" until ";" use for position for "degree=" until ";" use for degree starting after the first four ";" (after the time, id, position, and degree), the mac address is where "00:" and "02:" divided by semicolons * starting when seeing a ";", if it is followed by a "00" or "02", allocate to an array until the next ";" or "t" (to deal with the next timestamp)
+
+> i want to divide the position into x, y, z, and the pos values are divided by the delimeter "," for the xyz coordinates. for the mac address, i want to break it into four parts: the address (where afte the semicolon for the degree, until an equal signs = is what the mac address is, and then the signal is the value after the = until the delimeter ",", the channel is after the signal), the signal is after that comma until the next comma, and the device type is the comma after until the next semicolon which denotes the next mac address. there's the case of it also not having a semicolon after, where it would just be a new timestamp. the goal is to have each unique mac address have its own row with its traits of timestamp, id, pos, degree, signal, channel, device type as columns
+
+> i want to change how the mac addresses are grabbed. after the semicolon that follows the degree, the rest are mac addresses separated by ";" until t= comes up again at the start of a new paragraph. however, not all mac addresses start with 00: or 02:
+
+I refined the prompt by giving more details (splitting the position into three parts instead of one), and also included the mac address in my second prompt. I also discovered that not all mac addresses start with 00: or 02:, so I removed that `grepl` section of my code to broadly address the mac addresses.
+
+The AI did not provide any errors for the code, rather, any errors along the coding process were user-related due to incorrect prompts, that were then refined over time. A highlight of how my code changed was how the mac addresses were included, where before I did not consider them, and also fixing the assumption that all mac addresses would start with 00: or 02:. 
+
+I also wanted to convert the data types from the character type (if applicable), which took some tweaking due to formatting issues. This includes utilizing the `options(scipen=999)` in my setup for tables, and understanding how to make the timestamp readable. 
+
+The final code with functions took about 184 seconds (~3 minutes). 
+
+```{r}
+# convert some dataframes and code to images
+# 
+# library(gridExtra)
+# library(grid)
+# library(dplyr)
+# 
+# # head of the final_df
+# tbl = tableGrob(head(final_df, 11), rows=NULL)
+# png("head_table.png", width=800, height=260)
+# grid.draw(tbl)
+# dev.off()
+# 
+# counts of each mac address
+# tbl2 = tableGrob(mac_counts, rows=NULL)
+# png("mac_counts.png", width=250, height=500)
+# grid.draw(tbl2)
+# dev.off()
+# 
+# # unique dates
+# unique_dates = data.frame(date=unique(final_df$date))
+# tbl3 = tableGrob(unique_dates, rows=NULL)
+# png("unique_dates.png", width=100, height=110)
+# grid.draw(tbl3)
+# dev.off()
+# 
+# # unique counts of each column
+# unique_counts = data.frame(
+#   column = names(final_df),
+#   unique_values = sapply(final_df, function(x) length(unique(x)))
+# )
+# 
+# tbl4 = tableGrob(unique_counts, rows=NULL)
+# png("unique_counts.png", width=260, height=300)
+# grid.draw(tbl4)
+# dev.off()
+# 
+# # summary of final_df, custom built to prevent messy table output
+# numeric_cols = sapply(final_df, is.numeric)
+# 
+# numeric_summary = data.frame(
+#   column = names(final_df)[numeric_cols],
+#   min = sapply(final_df[numeric_cols], min),
+#   q1 = sapply(final_df[numeric_cols], function(x) quantile(x, 0.25)),
+#   median = sapply(final_df[numeric_cols], median),
+#   mean = sapply(final_df[numeric_cols], mean),
+#   q3 = sapply(final_df[numeric_cols], function(x) quantile(x, 0.75)),
+#   max = sapply(final_df[numeric_cols], max)
+# )
+# 
+# date_summary = data.frame(
+#   column = "timestamp",
+#   min = "2006-02-11 07:31:58.35",
+#   q1 = "2006-02-11 13:28:08.67",
+#   median = "2006-02-11 20:05:08.89",
+#   mean = "2006-02-16 15:50:07.36",
+#   q3 = "2006-02-19 14:56:44.03",
+#   max = "2006-03-09 20:41:10.46"
+# )
+# 
+# final_summary = rbind(numeric_summary, date_summary)
+# final_summary = final_summary[
+#   c(which(final_summary$column == "timestamp"), which(final_summary$column == "x"),
+#     which(!final_summary$column %in% c("timestamp", "x"))
+#   ),
+# ]
+# 
+# tbl5 = tableGrob(final_summary, rows=NULL)
+# png("numeric_summary.png", width=1000, height=210)
+# grid.draw(tbl5)
+# dev.off()
+```
