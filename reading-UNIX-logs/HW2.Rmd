@@ -1,0 +1,563 @@
+---
+title: "HW2"
+author: "Kylie Dickinson"
+date: "2026-04-30"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      warning=FALSE,
+                      message=FALSE)
+
+source("HW2.R")
+```
+
+```{r visualization setup}
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(scales)
+
+log_theme = theme_minimal(base_family="serif") +
+  theme(
+    plot.title=element_text(size=11, margin=margin(b=8)),
+    plot.subtitle=element_text(size=10, color="gray40"),
+    axis.text=element_text(size = 9),
+    panel.grid.minor=element_blank(),
+    axis.title=element_text(size=9),
+    legend.text=element_text(size=9),
+    legend.title=element_text(size=9)
+  )
+```
+
+## I. Approach of Metadata
+### I-1. General Metadata Format
+
+The metadata follows a format structure of:
+$$\texttt{date-time logging-host app PID message}$$
+For my approach, I first wanted to ignore any miscellaneous lines, including blank lines and header lines (for the log files). Before removing, the total number of lines in the file is found to be 99,968. 
+
+```{r, echo=TRUE, eval=FALSE}
+keep = !grepl("^#", lines) & !grepl("^\\s*$", lines)
+```
+
+I wrote a general pattern that captures any abbreviated month with its date and time, any letter/numerical string that contains periods, underscores, and dashes for a logging host, and a catch-all for the message. The app/PID required multiple rounds of testing, ultimately landing on the same expression as the logging host, with an optional second term for the app if it's two words, and an optional identifier for a PID.
+
+```{r, echo=TRUE, eval=FALSE}
+pattern = paste0(
+  "^([A-Z][a-z]{2}\\s{1,2}\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2})", 
+  "\\s+",
+  "([A-Za-z0-9._-]+)", 
+  "\\s+",
+  "([A-Za-z0-9\\._-]+)(\\s[A-Za-z0-9._-]+)?(\\[\\d+\\])?", 
+  ":\\s",
+  "(.+)$"
+)
+```
+
+It's found that there are now 99,960 lines, with 99,053 lines matching this general pattern and 907 not matching. Before moving on to special exceptions, a log labels vector is created for the dataframe so that each line will have its respective log file. The dataframe consists of six columns and one temporary column called `matched`, using a written function called `pull_col` in tangent with `regexec` and `regmatches`:
+
+* date_time
+
+* logging_host
+
+* app
+
+* pid
+
+* message
+
+* log_file
+
+* matched
+
+```{r, eval=FALSE, echo=TRUE}
+pull_col = function(list, index) {
+  sapply(list, function(x) if (length(x) == 0) NA_character_ else x[index])
+}
+```
+
+The `matched` column indicates which lines in the dataframe are filled. Since `regmatches` fills in `character(0)` for non-matches, `FALSE` values will be additionally evaluated as special pattern exceptions.
+
+### I-2. Special Metadata Exceptions
+
+An exploration of the non-matching data shows four case exceptions to the general pattern, all having to do with app/PID formats. Case 1 addresses the format of **app(module)[pid]**, case 2 addresses the format of **app[number part of app] ([pid])**, case 3 addresses the format of **com.apple.xpc.launchd[1] (com.apple...WebContent.37963)**, and case 4 addresses the format of **com.apple.xpc.launchd[1] (com.apple.WebKit.Networking.A546008E-...[33438])**. The counts of these cases are 853, 35, 18, and 1, which adds up to 907 (our total number of non-matches).
+
+Once each case is pattern matched, they are cleaned to fit the format of the general metadata and filled back into the original dataframe.
+
+The `matched` column is now removed after realizing 99,960 matches, and the dataframe `df` is complete.
+
+```{r 1: df preview}
+kable(head(df, 10), caption="Log DataFrame Preview (first 10 rows)") |>
+  kable_styling(latex_options=c("striped", "condensed"), full_width=FALSE) |>
+  column_spec(5, monospace=TRUE, width="6cm") 
+```
+
+## II. Data Validation
+### II-1. Log Files
+
+To formally begin data validation and exploration, we'll take a look at the log files. There are 5 log files in this specific order:
+
+* auth.log
+
+* auth2.log
+
+* loghub/Linux/Linux_2k.log
+
+* loghub/Mac/Mac_2k.log
+
+* loghub/OpenSSH/SSH_2k.log
+
+They make up 86,839, 7121, 2000, 2000, and 2000 lines respectively. To dive further into the individual logs, it's worth looking at their dates. If the date range of the entire file is dependent on the order of the logs, then it would start Nov 30 06:39:00 in **auth.log**, and end in Dec 10 11:04:45 in the **SSH_2k.log**. Each log has the following date range:
+
+> auth.log: Nov 30 06:39:00 – Dec 31 22:27:48 (31.65889 days)
+>
+> auth2.log: Mar 27 13:06:56 – Apr 20 14:14:29 (24.04691 days)
+>
+> loghub/Linux/Linux_2k.log: Jun 14 15:16:01 – Jul 27 14:42:00 (42.97638 days)
+>
+> loghub/Mac/Mac_2k.log: Jul 01 09:00:55 – Jul 08 08:10:46 (6.965174 days)
+>
+> loghub/OpenSSH/SSH_2k.log: Dec 10 06:55:46 – Dec 10 11:04:45 (0.1729051 days)
+
+Since these dates do not include the year, for additional context, it was attempted to try and comb through the messages in the dataframe to see if any information could be extracted. UNIX was launched in 1971, so as an assurance, the years 1971–2026 were used in `regex` pattern matching in the messages. A function was written called `explore_year` to analyze each individual log file and expression search for an inputted year. First, the unique "years" were found in the messages, and using `explore_year`, the context of the message was taken into account. Some "years" were disqualified due to not actually being a year. It was found that there were two relevant years in these 99,960 message lines: **2005** for the Linux log, and **2017** for the Mac log. This indicates the lines are not completely linear in time and are independent between logs.
+
+Below is the method of year grabbing, as well as year testing:
+
+```{r, eval=FALSE, echo=TRUE}
+year_pattern = "\\b(19[7-9][0-9]|200[0-9]|201[0-9]|202[0-6])\\b" # 1971-2026
+
+for (log in unique(df$log_file)) {
+  log_df = df[df$log_file == log, ]
+
+  has_year = !is.na(log_df$message) & grepl(year_pattern, log_df$message)
+  year_rows = log_df[has_year, ]
+  
+  cat("\n", rep("=", 50), "\n", sep="")
+  cat("Log file:", log, "\n")
+  cat("Rows with year in message:", nrow(year_rows), "\n")
+  
+  if (nrow(year_rows) > 0) {
+    years_found = regmatches(year_rows$message, gregexpr(year_pattern, year_rows$message))
+    years_flat = unlist(years_found)
+    
+    cat("Unique years found:", paste(sort(unique(years_flat)), collapse=", "), "\n\n")
+    
+    sample_rows = head(year_rows, 10)
+    for (i in seq_len(nrow(sample_rows))) {
+      cat(sprintf("  [%s] app=%-20s msg=%s\n",
+                  sample_rows$date_time[i],
+                  sample_rows$app[i],
+                  sample_rows$message[i]))
+    }
+  } else {
+    cat("  (No year mentions found in messages)\n")
+  }
+}
+
+explore_year = function(year, log_file_name) {
+  year_pattern = paste0("\\b", year, "\\b")
+  log_df = df[df$log_file == log_file_name, ]
+  
+  has_year = !is.na(log_df$message) & grepl(year_pattern, log_df$message)
+  year_rows = log_df[has_year, ]
+  
+  cat(rep("=", 60), "\n", sep="")
+  cat("Year:", year, "| Log file:", log_file_name, "\n")
+  cat("Matching rows:", nrow(year_rows), "\n")
+  cat(rep("=", 60), "\n", sep="")
+  
+  if (nrow(year_rows) == 0) {
+    cat("No messages containing", year, "in this log file.\n")
+    return(invisible(NULL))
+  }
+  
+  for (i in seq_len(nrow(year_rows))) {
+    cat(sprintf("\n[%d] %s | app: %s\n", i, year_rows$date_time[i], year_rows$app[i]))
+    cat("    ", year_rows$message[i], "\n")
+  }
+  
+  return(invisible(year_rows))
+}
+```
+
+Since the years were captured for the Linux and Mac logs, their time-ranges can be seen in the following two bar plots:
+
+```{r 2/3: mac and linux datetimes}
+library(patchwork)
+
+mac_df = df[df$log_file == "loghub/Mac/Mac_2k.log", ]
+mac_df$parsed_dt = as.POSIXct(paste("2017", mac_df$date_time), 
+                               format="%Y %b %d %H:%M:%S")
+
+p_mac = ggplot(mac_df, aes(x=parsed_dt)) +
+  geom_histogram(bins=60, fill="#2c7bb6", color="white", linewidth=0.2) +
+  scale_x_datetime(labels=date_format("%b %d"), date_breaks="2 days") +
+  labs(title="Figure 1: Mac Log - Activity Over Time (2017)",
+       subtitle="loghub/Mac/Mac_2k.log",
+       x="Date", y="Count") +
+  log_theme +
+  theme(axis.text.x=element_text(hjust=1))
+
+linux_df = df[df$log_file == "loghub/Linux/Linux_2k.log", ]
+linux_df$parsed_dt = as.POSIXct(paste("2005", linux_df$date_time),
+                                 format="%Y %b %d %H:%M:%S")
+
+p_linux = ggplot(linux_df, aes(x=parsed_dt)) +
+  geom_histogram(bins=60, fill="#d7191c", color="white", linewidth=0.2) +
+  scale_x_datetime(labels=date_format("%b %d"), date_breaks="4 days") +
+  labs(title="Figure 2: Linux Log - Activity Over Time (2005)",
+       subtitle="loghub/Linux/Linux_2k.log",
+       x="Date", y="Count") +
+  log_theme +
+  theme(axis.text.x=element_text(angle=35, hjust=1))
+
+p_mac | p_linux
+```
+
+### II-1. Apps, PIDs, & Logging Hosts
+
+Moving on from the date-time, for PIDs, it's verified that they are all numbers before they are converted to an integer column. With the apps, only 4 out of the 104 contain numbers (e.g., `syslogd 1.4.1`, `sandboxd[129]`, `com.apple.xpc.launchd[1]`, `BezelServices 255.10`), where **syslogd 1.4.1** and **BezelServices 22.10** contain versions. The others have an additional structure. The most common apps are shown in Table 2, and Figure 3 displays the top 15 hosts and the 5 highest apps logging information from that host.
+
+```{r 4: top 20 app counts table}
+app_counts_df = as.data.frame(head(sort(table(df$app), decreasing=TRUE), 20))
+colnames(app_counts_df) = c("Application", "Count")
+
+kable(app_counts_df, caption="Top 20 Applications by Count",
+      row.names=FALSE) |>
+  kable_styling(latex_options=c("striped", "condensed"), full_width=FALSE, font_size=9)
+```
+
+```{r 5: top 5 apps per host (heatmap), out.width="80%", fig.align="center"}
+all_host_app = do.call(rbind, lapply(unique(df$logging_host), function(host) {
+  host_df = df[df$logging_host == host, ]
+  app_counts = sort(table(host_df$app), decreasing=TRUE)
+  top5 = head(app_counts, 5)
+  data.frame(host=host, app=names(top5), count=as.integer(top5))
+}))
+
+top_hosts = names(head(sort(table(df$logging_host), decreasing=TRUE), 15))
+plot_df = all_host_app[all_host_app$host %in% top_hosts, ]
+
+ggplot(plot_df, aes(x=app, y=host, fill=count)) +
+  geom_tile(color="white", linewidth=0.4) +
+  geom_text(aes(label=count), size=1.4, color="white") +
+  scale_fill_gradient(low="#093e80", high="#b30000", name="Count") +
+  labs(title="Figure 3: Top 5 Apps per Logging Host (top 15 hosts)",
+       x="Application", y="Host") +
+  log_theme +
+  theme(axis.text.x=element_text(angle=40, hjust=1, size=6),
+        axis.text.y=element_text(size=7))
+```
+
+There is only one logging host for almost all log files except **loghub/Mac/Mac_2k.log**, which has 38 different logging hosts.
+
+```{r 6: unique hosts per log file, out.width="85%", fig.align="center"}
+host_summary = do.call(rbind, lapply(unique(df$log_file), function(log) {
+  log_df = df[df$log_file == log, ]
+  data.frame(
+    log_file=log,
+    unique_hosts=length(unique(log_df$logging_host))
+  )
+}))
+
+ggplot(host_summary, aes(x=reorder(log_file, unique_hosts), y=unique_hosts)) +
+  geom_col(fill="#5e4fa2", width=0.6) +
+  geom_text(aes(label=unique_hosts), hjust=-0.2, size=3.5) +
+  coord_flip() +
+  labs(title="Figure 4: Unique Logging Hosts per Log File",
+       x=NULL, y="Unique Host Count") +
+  log_theme +
+  ylim(0, max(host_summary$unique_hosts)*1.15)
+```
+
+There are 37 logging hosts that resemble IP addresses, seen in Figure 5. 
+
+```{r 7: ip-like hosts bar chart}
+ip_hosts_df = as.data.frame(ip_host_counts)
+colnames(ip_hosts_df) = c("Host", "Count")
+
+kable(ip_hosts_df, caption="IP-like Logging Hosts Count", row.names=FALSE) |>
+  kable_styling(latex_options=c("striped", "repeat_header", "scale_down"), full_width=FALSE, font_size=9)
+```
+
+## III. Approach of Logins
+### III-1. Successful Logins
+
+To find successful logins, keywords are required to be able to go through the 99,960 lines. My strategy was to familiarize myself with the 104 different applications, finding which are more relevant to login message information. This was done by doing a small preview of each app with some message lines. After an initial run through, I denoted the relevant/important apps and previewed an even larger portion of messages, fine tuning any keywords for successful (and invalid) logins. The apps I focused on were: `CRON`, `sshd`, `systemd-logind`, `systemd`, `sudo`, `su`, `sshd(pam_unix)`, `su(pam_unix)`, `ftpd`, `klogind`, `login(pam_unix)`, and `gdm(pam_unix)`.
+
+```{r 8: important apps message counts, out.width="80%", fig.align="center"}
+imp_counts = sapply(important_apps, function(app) sum(df$app == app, na.rm=TRUE))
+imp_df = data.frame(app=important_apps, count=imp_counts)
+
+ggplot(imp_df, aes(x=reorder(app, count), y=count)) +
+  geom_col(fill="#4393c3", width=0.65) +
+  geom_text(aes(label=count), hjust=-0.2, size=3.2) +
+  coord_flip() +
+  labs(title="Figure 5: Message Counts for Login-Related Applications",
+       x=NULL, y="Message Count") +
+  log_theme +
+  ylim(0, max(imp_df$count)*1.12)
+```
+
+I also wrote a function called `show_all_messages` to get a greater understanding of what pattern the lines follow for the important apps. 
+
+```{r, eval=FALSE, echo=TRUE}
+show_all_messages = function(app_name) {
+  index = df$app == app_name
+  count = sum(index)
+  cat("\nApp:", app_name, "(", count, "total )\n")
+  cat(rep("-", 40), "\n", sep="")
+  print(df$message[index])
+}
+```
+
+The keywords grabbed for successful logins were:
+
+> "Accepted"
+>
+> "session opened"
+>
+> "connection from"
+>
+> "New session"
+
+This totaled 3550 lines out of 99,960. After pattern matching and creating a separate dataframe for successful logins, Table 4 shows a preview of 20 users and their associated IPs. 
+
+```{r 9: successful login users/ips}
+display_df = successful_logins[!is.na(successful_logins$ip), 
+                               c("app", "user", "ip")]
+display_df = head(display_df, 20)
+
+kable(display_df, caption="Users and IPs of Successful Logins", row.names=FALSE,
+      col.names=c("App", "User", "IP")) |>
+  kable_styling(latex_options=c("striped", "repeat_header", "condensed"), full_width=FALSE)
+```
+
+As an additional way to preserve information, for `su`, `sudo`, and `login(pam_unix)`, the issuing user was preserved in a separate column in the successful login dataframe for a total of 196 lines.
+
+```{r 10: issuing users in successful logins}
+display_df = head(successful_logins[!is.na(successful_logins$issuing_user) & 
+                                      successful_logins$issuing_user != "", 
+                                    c("app", "user", "issuing_user", "ip")], 10)
+
+kable(display_df, caption="Successful Logins with Issuing User", row.names=FALSE,
+      col.names=c("App", "User", "Issuing User", "IP")) |>
+  kable_styling(latex_options=c("striped", "repeat_header", "condensed"), full_width=FALSE)
+```
+
+### III-2. Invalid Logins
+
+The same strategy was applied to invalid logins, with the following keywords:
+
+> "Invalid user"
+>
+> "authentication failure"
+>
+> "[Aa]uthentication failed"
+>
+> "POSSIBLE BREAK-IN ATTEMPT"
+
+This totaled 19113 lines out of 99,960. After pattern matching and creating a separate dataframe for invalid logins, a preview of the top 20 invalid IP addresses are shown in Figure 6.
+
+```{r 11: top 20 invalid login IPs, out.width="90%", fig.align="center"}
+invalid_ip_df = as.data.frame(head(sort(table(invalid_logins$ip), decreasing=TRUE), 20))
+colnames(invalid_ip_df) = c("IP", "Count")
+
+ggplot(invalid_ip_df, aes(x=reorder(IP, Count), y=Count)) +
+  geom_col(fill="#d73027", width=0.7) +
+  geom_text(aes(label=Count), hjust=-0.2, size=3.2) +
+  coord_flip() +
+  labs(title="Figure 6: Top 20 IPs by Invalid Login Attempts",
+       x="IP Address", y="Attempt Count") +
+  log_theme +
+  ylim(0, max(invalid_ip_df$Count)*1.12)
+```
+
+Cross-referencing these invalid login related IP addresses to IP addresses in valid logins produces one address **85.245.107.41** that appears in both types of logins:
+
+```{r 12: IPs in both valid and invalid logins}
+both_ip_df = data.frame(
+  IP = both_ips,
+  invalid_attempts = sapply(both_ips, function(ip)
+    sum(!is.na(invalid_logins$ip) & invalid_logins$ip == ip)),
+  successful_logins = sapply(both_ips, function(ip)
+    sum(!is.na(successful_logins$ip) & successful_logins$ip == ip))
+)
+
+kable(both_ip_df, caption="IPs in Valid and Invalid Logins",
+      row.names=FALSE) |>
+  kable_styling(latex_options=c("striped", "repeat_header", "condensed"), full_width=FALSE)
+```
+
+There were also multiple IP addresses that used the same invalid user login, seen in Table 7. The column **Total Unique IPs** denotes the total number of IPs detected per that user. The column **Shared Network Count** denotes there are $x$ number of IP addresses amongst those **Total Unique IPs** that have the same network and domain. There are a total of 36 users that ran into IP addresses with the same network/domain, and 116 users who did not have this problem.
+
+```{r, echo=TRUE, eval=FALSE}
+shared_netdom_count = 0
+for (user in names(multiple_ip_users)) {
+  ips = unique(invalid_user_ip$ip[invalid_user_ip$user == user]) # gets unique IPs per user
+  ip_network_domain = sub("^(\\d+\\.\\d+\\.\\d+)\\..*", "\\1", ips)  # e.g., 218.188.2
+  if (any(duplicated(ip_network_domain))) {
+    shared_netdom_count = shared_netdom_count + 1
+    cat("\nUser:", user, "\n")
+    cat("Shared domain/network:", 
+        paste(unique(ip_network_domain[duplicated(ip_network_domain)]), collapse=", "), "\n")
+  }
+}
+cat("Users with IPs from same network/domain:", shared_netdom_count, "\n")
+cat("Users with IPs from different network/domains:", 
+    length(multiple_ip_users) - shared_netdom_count, "\n")
+```
+
+```{r 13: shared network domain per user}
+shared_netdom_df = do.call(rbind, lapply(names(multiple_ip_users), function(user) {
+  ips = unique(invalid_user_ip$ip[invalid_user_ip$user == user])
+  ip_net = sub("^(\\d+\\.\\d+\\.\\d+)\\..*", "\\1", ips)
+  shared = unique(ip_net[duplicated(ip_net)])
+  data.frame(
+    user=user,
+    total_ips=length(ips),
+    shared_networks=length(shared) # count instead of raw IPs to avoid bloat
+  )
+}))
+shared_netdom_df = shared_netdom_df[shared_netdom_df$shared_networks > 0, ]
+shared_netdom_df = shared_netdom_df[order(-shared_netdom_df$shared_networks), ]
+
+kable(shared_netdom_df,
+      caption="Users with IPs Sharing Network Domains",
+      col.names=c("User", "Total Unique IPs", "Shared Network Count"),
+      row.names=FALSE) |>
+  kable_styling(latex_options=c("striped", "repeat_header", "condensed"), full_width=FALSE)
+```
+
+### III-3. Authentication Failures
+
+There have also been authentication failures, with the keywords used being "authentication", "authenticating", and "authenticate". There were 4540 lines related to authentication failures. The relevant apps are `sshd`, `sshd(pam_unix)`, `klogind`, `gdm(pam_unix)`, `gdm-binary`, and `UserEventAgent`.
+
+```{r, echo=TRUE, eval=FALSE}
+auth_index = grepl("authentication|authenticating|authenticate", df$message, ignore.case=TRUE)
+sum(auth_index, na.rm=TRUE) 
+unique(df$app[auth_index])
+
+# for (app in unique(df$app[auth_index])) {
+#   cat("\nApp:", app, "\n")
+#   cat(rep("-", 40), "\n", sep="")
+#   print(head(df$message[df$app == app & auth_index], 50))
+# }
+auth_index = grepl("authentication|authenticating|authenticate", df$message, ignore.case = TRUE) &
+             df$app %in% c("klogind", "sshd(pam_unix)", "sshd")
+auth_fail_df = df[auth_index, ]
+auth_fail_df$ip = NA_character_
+
+  # klogind: "Authentication failed from 163.27.187.39"
+index = auth_fail_df$app == "klogind"
+m = regexec("from ([0-9.]+)", auth_fail_df$message[index])
+p = regmatches(auth_fail_df$message[index], m)
+auth_fail_df$ip[index] = pull_col(p, 2)
+
+  # sshd(pam_unix): rhost= format
+index = auth_fail_df$app == "sshd(pam_unix)"
+m = regexec("rhost=([A-Za-z]*-?(\\d+-\\d+-\\d+-\\d+).*)",
+            auth_fail_df$message[index])
+p = regmatches(auth_fail_df$message[index], m)
+raw_ip = pull_col(p, 2)
+auth_fail_df$ip[index] = ifelse(
+  grepl("^[0-9.]+$", raw_ip),
+  raw_ip,
+  gsub("-", ".", sub("^[A-Za-z]*-?(\\d+-\\d+-\\d+-\\d+).*", "\\1", raw_ip))
+)
+
+  # sshd: just get ip address 
+index = auth_fail_df$app == "sshd"
+m = regexec("([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})",
+            auth_fail_df$message[index])
+p = regmatches(auth_fail_df$message[index], m)
+auth_fail_df$ip[index] = pull_col(p, 2)
+
+auth_fail_df$ip[auth_fail_df$ip == ""] = NA
+```
+
+Below features Figure 7 that showcases the top 20 IPs within authentication failures.
+
+```{r 14: top 20 auth failure IPs, out.width="80%", fig.align="center"}
+auth_fail_df2 = as.data.frame(head(sort(table(auth_fail_df$ip), decreasing=TRUE), 20))
+colnames(auth_fail_df2) = c("IP", "Count")
+
+ggplot(auth_fail_df2, aes(x=reorder(IP, Count), y=Count)) +
+  geom_col(fill="#762a83", width=0.7) +
+  geom_text(aes(label=Count), hjust=-0.2, size=3.2) +
+  coord_flip() +
+  labs(title="Figure 7: Top 20 IPs by Authentication Failures",
+       x="IP Address", y="Failure Count") +
+  log_theme +
+  ylim(0, max(auth_fail_df2$Count)*1.12)
+```
+
+## IV. Approach of `sudo`
+
+Using my previously written function `show_all_messages`, I applied this once again to the app `sudo` for an idea of the message patterns. To extract the user and executables from the `sudo` messages, I grabbed "COMMAND=" lines and pattern matched to get the two capture groups. To extract the machine, the logging host was used.
+
+```{r, echo=TRUE, eval=FALSE}
+sudo_df = df[df$app == "sudo" & grepl("COMMAND=", df$message), ]
+sudo_df$user = NA_character_
+sudo_df$executable = NA_character_
+
+# user is before the first :
+# command path is after COMMAND=
+m = regexec("^\\s*(\\S+)\\s*:.*COMMAND=([A-Za-z0-9.-_/]+\\s*.*)$", sudo_df$message)
+p = regmatches(sudo_df$message, m)
+sudo_df$user = pull_col(p, 2)  # e.g., ubuntu
+sudo_df$command = pull_col(p, 3)  # e.g., /usr/bin/apt-get update
+
+exec = sub("^(\\S+)\\s*.*", "\\1", sudo_df$command)
+sudo_df$executable = sub(".*/", "", exec)
+sudo_table = unique(sudo_df[, c("logging_host", "user", "executable", "command")])
+print(sudo_table)
+```
+
+This produced a clean sudo table that consists of the logging host, user, executable, and full command line.
+
+```{r 15: sudo table preview}
+sudo_preview = head(sudo_table, 15)
+sudo_preview$command = ifelse(
+  nchar(sudo_preview$command) > 65,
+  paste0(substr(sudo_preview$command, 1, 65), "..."),  # truncate at 65 chars
+  sudo_preview$command
+)
+
+kable(head(sudo_preview, 15), caption="Sudo Commands Preview (first 15 rows)",
+      row.names=FALSE) |>
+  kable_styling(latex_options=c("striped", "scale_down", "repeat_header", "condensed"), full_width=FALSE, font_size=9) |>
+  column_spec(4, monospace=TRUE, width="9cm")
+```
+
+Some of the unique executables can be seen in Figure 8. 
+
+```{r 16: all unique executables, out.width="75%", fig.align="center"}
+exec_counts = as.data.frame(sort(table(sudo_df$executable), decreasing=FALSE))
+colnames(exec_counts) = c("executable", "count")
+
+ggplot(exec_counts, aes(x=count, y=executable)) +
+  geom_bar(stat="identity", fill="#2c7bb6") +
+  geom_text(aes(label=count), hjust=-0.2, size=3) +
+  labs(title="Figure 8: Executables Ran via Sudo",
+       x="Count", y="Executable") +
+  log_theme
+```
+
+A sanity check was initiated to ensure all executables were not NA; the result of this check was `character(0)`, proving all executables were grabbed.
+
+## V. AI Usage
+
+The AI used was Claude. It was purposed by feeding chunks of my R file code to generate some of the visualizations, which I then tweaked to fit the format of RMarkdown PDF. It was also used sporadically to debug my main code. Refining was done by reporting my code chunk and my given error in R, working from there. Much of the tweaking in my code was trying to brainstorm patterns for `regex`, which I bounce off of Claude (but Claude did not necessarily generate initially). Claude also helped with syntax if I knew what I wanted to code but did not know the respective R function for it.  
+
+The total run time for my R file was about 11 seconds.
+
+
+
+
+
+
